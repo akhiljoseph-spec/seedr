@@ -2,7 +2,6 @@ package com.seedr.tvapp
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -51,14 +50,9 @@ object SeedrApi {
     }
 
     suspend fun pollToken(deviceCode: String): String? = withContext(Dispatchers.IO) {
-        val url = "https://www.seedr.cc/api/device/authorize".toHttpUrlOrNull()!!
-            .newBuilder()
-            .addQueryParameter("client_id", CLIENT_ID)
-            .addQueryParameter("device_code", deviceCode)
-            .build()
-
+        val requestUrl = "https://www.seedr.cc/api/device/authorize?client_id=$CLIENT_ID&device_code=$deviceCode"
         val request = Request.Builder()
-            .url(url)
+            .url(requestUrl)
             .get()
             .build()
 
