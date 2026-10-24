@@ -45,22 +45,24 @@ class MainActivity : AppCompatActivity() {
     private fun startDeviceFlow() {
         lifecycleScope.launch {
             try {
-                statusText.text = "Requesting device code..."
+                statusText.text = "Requesting code from Seedr..."
                 val resp = SeedrApi.requestDeviceCode()
-                statusText.text = "Authorize this device:\n1. Open ${resp.verificationUrl}\n2. Enter code: ${resp.userCode}"
-
-                startPolling(resp.deviceCode, resp.interval)
+                
+                statusText.text = "1. Open: ${resp.verificationUrl}\n2. Enter Code: ${resp.userCode}\n\nWaiting for approval..."
+                startPolling(resp.deviceCode, resp.interval, resp.userCode)
             } catch (e: Exception) {
                 statusText.text = "Connection Error: ${e.localizedMessage}"
             }
         }
     }
 
-    private fun startPolling(deviceCode: String, intervalSeconds: Long) {
+    private fun startPolling(deviceCode: String, intervalSeconds: Long, userCode: String) {
         pollingJob?.cancel()
         pollingJob = lifecycleScope.launch {
+            var attempts = 0
             while (isActive) {
                 delay(intervalSeconds * 1000L)
+                attempts++
                 try {
                     val receivedToken = SeedrApi.pollToken(deviceCode)
                     if (!receivedToken.isNullOrEmpty()) {
@@ -70,11 +72,14 @@ class MainActivity : AppCompatActivity() {
                             .putString("auth_token", receivedToken)
                             .apply()
 
-                        statusText.text = "Authenticated successfully!"
+                        statusText.text = "Device Authorized! Loading files..."
                         loadFiles()
                         break
+                    } else {
+                        statusText.text = "1. Open: seedr.cc/devices\n2. Enter Code: $userCode\n\nChecking approval status ($attempts)..."
                     }
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    // Continue polling even on temporary network drop
                 }
             }
         }
@@ -84,20 +89,28 @@ class MainActivity : AppCompatActivity() {
         val currentToken = token ?: return
         lifecycleScope.launch {
             try {
-                statusText.text = "Fetching library..."
+                statusText.visibility = View.VISIBLE
+                statusText.text = "Loading media files..."
                 val items = SeedrApi.listFolder(currentToken, folderId)
-                statusText.visibility = View.GONE
-                recyclerView.visibility = View.VISIBLE
-                recyclerView.adapter = MediaAdapter(items) { item ->
-                    if (item.isFolder) {
-                        loadFiles(item.id)
-                    } else {
-                        playVideo(item.id, item.name)
+                
+                if (items.isEmpty()) {
+                    statusText.text = "Seedr folder is empty.\nAdd a torrent/magnet link on Seedr.cc to stream."
+                    statusText.visibility = View.VISIBLE
+                    recyclerView.visibility = View.GONE
+                } else {
+                    statusText.visibility = View.GONE
+                    recyclerView.visibility = View.VISIBLE
+                    recyclerView.adapter = MediaAdapter(items) { item ->
+                        if (item.isFolder) {
+                            loadFiles(item.id)
+                        } else {
+                            playVideo(item.id, item.name)
+                        }
                     }
                 }
             } catch (e: Exception) {
                 statusText.visibility = View.VISIBLE
-                statusText.text = "Failed to load library: ${e.localizedMessage}"
+                statusText.text = "Error: ${e.localizedMessage}\n(Token might be expired. Clear app data to re-link)"
             }
         }
     }
@@ -106,7 +119,7 @@ class MainActivity : AppCompatActivity() {
         val currentToken = token ?: return
         lifecycleScope.launch {
             try {
-                Toast.makeText(this@MainActivity, "Resolving stream...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Opening $fileName...", Toast.LENGTH_SHORT).show()
                 val streamUrl = SeedrApi.resolveStreamUrl(currentToken, fileId)
                 val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
                     putExtra("STREAM_URL", streamUrl)
@@ -114,7 +127,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 startActivity(intent)
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "Stream error: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Stream Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
