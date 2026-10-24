@@ -146,7 +146,7 @@ object SeedrApi {
                 return@withContext redirectLocation
             }
             val body = response.body?.string().orEmpty()
-            if (body.contains(""url"")) {
+            if (body.contains("url")) {
                 val json = JSONObject(body)
                 json.optString("url")
             } else {
