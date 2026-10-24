@@ -2,10 +2,18 @@ package com.seedr.tvapp
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
+
+sealed class PollResult {
+    data class Success(val token: String) : PollResult()
+    object Pending : PollResult()
+    object EmptyToken : PollResult()
+    data class Error(val message: String) : PollResult()
+}
 
 data class DeviceCodeResponse(
     val deviceCode: String,
@@ -49,7 +57,7 @@ object SeedrApi {
         }
     }
 
-    suspend fun pollToken(deviceCode: String): String? = withContext(Dispatchers.IO) {
+    suspend fun pollToken(deviceCode: String): PollResult = withContext(Dispatchers.IO) {
         val requestUrl = "https://www.seedr.cc/api/device/authorize?client_id=$CLIENT_ID&device_code=$deviceCode"
         val request = Request.Builder()
             .url(requestUrl)
@@ -58,23 +66,66 @@ object SeedrApi {
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
+            android.util.Log.d("SeedrApi", "pollToken HTTP ${response.code}: $body")
 
             if (body.startsWith("{")) {
                 val json = JSONObject(body)
 
                 if (json.has("access_token")) {
-                    return@withContext json.getString("access_token")
+                    val token = json.getString("access_token")
+                    if (token.isNotEmpty()) {
+                        return@withContext PollResult.Success(token)
+                    } else {
+                        return@withContext PollResult.EmptyToken
+                    }
                 }
                 if (json.has("token")) {
-                    return@withContext json.getString("token")
+                    val token = json.getString("token")
+                    if (token.isNotEmpty()) {
+                        return@withContext PollResult.Success(token)
+                    }
                 }
 
                 val error = json.optString("error")
                 if (error == "authorization_pending") {
-                    return@withContext null
+                    return@withContext PollResult.Pending
+                } else if (error.isNotEmpty()) {
+                    return@withContext PollResult.Error(error)
                 }
             }
-            null
+            if (response.code == 401) {
+                return@withContext PollResult.Error("Device code expired or invalid (HTTP 401)")
+            }
+            PollResult.Error("HTTP ${response.code}")
+        }
+    }
+
+    suspend fun loginWithPassword(username: String, password: String): String = withContext(Dispatchers.IO) {
+        val form = FormBody.Builder()
+            .add("grant_type", "password")
+            .add("client_id", "seedr_chrome")
+            .add("type", "login")
+            .add("username", username)
+            .add("password", password)
+            .build()
+
+        val request = Request.Builder()
+            .url("https://www.seedr.cc/oauth_test/token.php")
+            .post(form)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (body.startsWith("{")) {
+                val json = JSONObject(body)
+                if (json.has("access_token")) {
+                    val token = json.getString("access_token")
+                    if (token.isNotEmpty()) return@withContext token
+                }
+                val error = json.optString("error_description", json.optString("error", "Login failed (HTTP ${response.code})"))
+                throw IOException(error)
+            }
+            throw IOException("Login failed (HTTP ${response.code})")
         }
     }
 
