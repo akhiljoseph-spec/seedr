@@ -1,11 +1,15 @@
 package com.seedr.tvapp
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -32,6 +36,12 @@ class MainActivity : AppCompatActivity() {
         recyclerView = findViewById(R.id.recyclerView)
         recyclerView.layoutManager = LinearLayoutManager(this)
 
+        statusText.setOnClickListener {
+            if (token.isNullOrEmpty()) {
+                showAuthOptionsDialog()
+            }
+        }
+
         val prefs = getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
         token = prefs.getString("auth_token", null)
 
@@ -42,16 +52,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startDeviceFlow() {
+    private fun startDeviceFlow(forceNew: Boolean = false) {
+        val prefs = getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
+        val savedDeviceCode = prefs.getString("pending_device_code", null)
+        val savedUserCode = prefs.getString("pending_user_code", null)
+        val savedExpiresAt = prefs.getLong("pending_expires_at", 0L)
+
+        val now = System.currentTimeMillis()
+        if (!forceNew && !savedDeviceCode.isNullOrEmpty() && !savedUserCode.isNullOrEmpty() && savedExpiresAt > now) {
+            statusText.text = "1. Open: https://www.seedr.cc/devices\n2. Enter Code: $savedUserCode\n\nWaiting for approval...\n(Tap screen for options)"
+            startPolling(savedDeviceCode, 5L, savedUserCode)
+            return
+        }
+
         lifecycleScope.launch {
             try {
                 statusText.text = "Requesting code from Seedr..."
                 val resp = SeedrApi.requestDeviceCode()
-                
-                statusText.text = "1. Open: ${resp.verificationUrl}\n2. Enter Code: ${resp.userCode}\n\nWaiting for approval..."
+
+                prefs.edit()
+                    .putString("pending_device_code", resp.deviceCode)
+                    .putString("pending_user_code", resp.userCode)
+                    .putLong("pending_expires_at", System.currentTimeMillis() + 15 * 60 * 1000L)
+                    .apply()
+
+                statusText.text = "1. Open: ${resp.verificationUrl}\n2. Enter Code: ${resp.userCode}\n\nWaiting for approval...\n(Tap screen for options)"
                 startPolling(resp.deviceCode, resp.interval, resp.userCode)
             } catch (e: Exception) {
-                statusText.text = "Connection Error: ${e.localizedMessage}"
+                statusText.text = "Connection Error: ${e.localizedMessage}\n\n(Tap screen to retry)"
             }
         }
     }
@@ -64,25 +92,130 @@ class MainActivity : AppCompatActivity() {
                 delay(intervalSeconds * 1000L)
                 attempts++
                 try {
-                    val receivedToken = SeedrApi.pollToken(deviceCode)
-                    if (!receivedToken.isNullOrEmpty()) {
-                        token = receivedToken
-                        getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
-                            .edit()
-                            .putString("auth_token", receivedToken)
-                            .apply()
-
-                        statusText.text = "Device Authorized! Loading files..."
-                        loadFiles()
-                        break
-                    } else {
-                        statusText.text = "1. Open: seedr.cc/devices\n2. Enter Code: $userCode\n\nChecking approval status ($attempts)..."
+                    when (val result = SeedrApi.pollToken(deviceCode)) {
+                        is PollResult.Success -> {
+                            saveTokenAndLoad(result.token)
+                            break
+                        }
+                        is PollResult.Pending -> {
+                            statusText.text = "1. Open: seedr.cc/devices\n2. Enter Code: $userCode\n\nChecking approval status ($attempts)...\n(Tap screen for options)"
+                        }
+                        is PollResult.EmptyToken -> {
+                            statusText.text = "1. Open: seedr.cc/devices\n2. Enter Code: $userCode\n\n⚠️ Approved on web, but Seedr returned an empty token!\nMake sure you entered your Seedr account password correctly when approving on web.\n\n(Tap screen for alternative login methods)"
+                            getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
+                                .edit()
+                                .remove("pending_device_code")
+                                .apply()
+                            break
+                        }
+                        is PollResult.Error -> {
+                            statusText.text = "1. Open: seedr.cc/devices\n2. Enter Code: $userCode\n\nStatus: ${result.message}\n\n(Tap screen to retry or change login)"
+                            getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
+                                .edit()
+                                .remove("pending_device_code")
+                                .apply()
+                            break
+                        }
                     }
                 } catch (e: Exception) {
                     // Continue polling even on temporary network drop
                 }
             }
         }
+    }
+
+    private fun saveTokenAndLoad(receivedToken: String) {
+        token = receivedToken
+        getSharedPreferences("seedr_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("auth_token", receivedToken)
+            .remove("pending_device_code")
+            .remove("pending_user_code")
+            .remove("pending_expires_at")
+            .apply()
+
+        statusText.text = "Device Authorized! Loading files..."
+        loadFiles()
+    }
+
+    private fun showAuthOptionsDialog() {
+        val options = arrayOf(
+            "Refresh Pairing Code",
+            "Login with Email & Password",
+            "Paste Token Manually"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Authentication Options")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> startDeviceFlow(forceNew = true)
+                    1 -> showEmailPasswordDialog()
+                    2 -> showPasteTokenDialog()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showEmailPasswordDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 40, 50, 10)
+        }
+        val emailInput = EditText(this).apply {
+            hint = "Seedr Email"
+            inputType = InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        }
+        val passInput = EditText(this).apply {
+            hint = "Seedr Password"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        layout.addView(emailInput)
+        layout.addView(passInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Seedr Direct Login")
+            .setView(layout)
+            .setPositiveButton("Log In") { _, _ ->
+                val email = emailInput.text.toString().trim()
+                val pass = passInput.text.toString().trim()
+                if (email.isNotEmpty() && pass.isNotEmpty()) {
+                    lifecycleScope.launch {
+                        try {
+                            statusText.text = "Logging into Seedr..."
+                            val tok = SeedrApi.loginWithPassword(email, pass)
+                            saveTokenAndLoad(tok)
+                        } catch (e: Exception) {
+                            Toast.makeText(this@MainActivity, "Login error: ${e.message}", Toast.LENGTH_LONG).show()
+                            startDeviceFlow()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showPasteTokenDialog() {
+        val input = EditText(this).apply {
+            hint = "Paste Bearer or Personal Access Token"
+        }
+        val container = LinearLayout(this).apply {
+            setPadding(50, 40, 50, 10)
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Paste Seedr Token")
+            .setView(container)
+            .setPositiveButton("Save & Connect") { _, _ ->
+                val pasted = input.text.toString().trim()
+                if (pasted.isNotEmpty()) {
+                    saveTokenAndLoad(pasted)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun loadFiles(folderId: String? = null) {
