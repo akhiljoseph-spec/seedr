@@ -2,7 +2,6 @@ package com.seedr.tvapp
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -30,14 +29,22 @@ object SeedrApi {
     private const val CLIENT_ID = "seedr_xbmc"
 
     suspend fun requestDeviceCode(): DeviceCodeResponse = withContext(Dispatchers.IO) {
+        // Correct endpoint: /api/device/code instead of /oauth/device/code
         val request = Request.Builder()
-            .url("https://www.seedr.cc/oauth/device/code?client_id=$CLIENT_ID")
+            .url("https://www.seedr.cc/api/device/code?client_id=$CLIENT_ID")
             .get()
             .build()
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException("Server returned HTTP ${response.code}: $body")
+            }
             val json = JSONObject(body)
+            if (!json.has("device_code")) {
+                val errorMsg = json.optString("error_description", json.optString("error", "Missing device_code"))
+                throw IOException(errorMsg)
+            }
             DeviceCodeResponse(
                 deviceCode = json.getString("device_code"),
                 userCode = json.getString("user_code"),
@@ -48,20 +55,16 @@ object SeedrApi {
     }
 
     suspend fun pollToken(deviceCode: String): String? = withContext(Dispatchers.IO) {
-        val form = FormBody.Builder()
-            .add("client_id", CLIENT_ID)
-            .add("device_code", deviceCode)
-            .add("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-            .build()
-
+        // Polling uses GET to /api/device/authorize
         val request = Request.Builder()
-            .url("https://www.seedr.cc/oauth/token")
-            .post(form)
+            .url("https://www.seedr.cc/api/device/authorize?client_id=$CLIENT_ID&device_code=$deviceCode")
+            .get()
             .build()
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             val json = JSONObject(body)
+
             if (json.has("access_token")) {
                 json.getString("access_token")
             } else {
