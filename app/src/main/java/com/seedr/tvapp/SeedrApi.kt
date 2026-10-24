@@ -2,6 +2,7 @@ package com.seedr.tvapp
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -23,13 +24,12 @@ data class SeedrItem(
 
 object SeedrApi {
     private val client = OkHttpClient.Builder()
-        .followRedirects(false)
+        .followRedirects(true)
         .build()
 
     private const val CLIENT_ID = "seedr_xbmc"
 
     suspend fun requestDeviceCode(): DeviceCodeResponse = withContext(Dispatchers.IO) {
-        // Correct endpoint: /api/device/code instead of /oauth/device/code
         val request = Request.Builder()
             .url("https://www.seedr.cc/api/device/code?client_id=$CLIENT_ID")
             .get()
@@ -38,38 +38,49 @@ object SeedrApi {
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw IOException("Server returned HTTP ${response.code}: $body")
+                throw IOException("HTTP ${response.code}: $body")
             }
             val json = JSONObject(body)
-            if (!json.has("device_code")) {
-                val errorMsg = json.optString("error_description", json.optString("error", "Missing device_code"))
-                throw IOException(errorMsg)
-            }
             DeviceCodeResponse(
                 deviceCode = json.getString("device_code"),
                 userCode = json.getString("user_code"),
                 verificationUrl = json.optString("verification_url", "https://www.seedr.cc/devices"),
-                interval = json.optLong("interval", 5L)
+                interval = json.optLong("interval", 5L).coerceAtLeast(3L)
             )
         }
     }
 
     suspend fun pollToken(deviceCode: String): String? = withContext(Dispatchers.IO) {
-        // Polling uses GET to /api/device/authorize
+        val url = "https://www.seedr.cc/api/device/authorize".toHttpUrlOrNull()!!
+            .newBuilder()
+            .addQueryParameter("client_id", CLIENT_ID)
+            .addQueryParameter("device_code", deviceCode)
+            .build()
+
         val request = Request.Builder()
-            .url("https://www.seedr.cc/api/device/authorize?client_id=$CLIENT_ID&device_code=$deviceCode")
+            .url(url)
             .get()
             .build()
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
-            val json = JSONObject(body)
 
-            if (json.has("access_token")) {
-                json.getString("access_token")
-            } else {
-                null
+            if (body.startsWith("{")) {
+                val json = JSONObject(body)
+
+                if (json.has("access_token")) {
+                    return@withContext json.getString("access_token")
+                }
+                if (json.has("token")) {
+                    return@withContext json.getString("token")
+                }
+
+                val error = json.optString("error")
+                if (error == "authorization_pending") {
+                    return@withContext null
+                }
             }
+            null
         }
     }
 
@@ -88,6 +99,9 @@ object SeedrApi {
 
         client.newCall(request).execute().use { response ->
             val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException("Failed to load folder (HTTP ${response.code})")
+            }
             val json = JSONObject(body)
             val results = mutableListOf<SeedrItem>()
 
@@ -125,19 +139,20 @@ object SeedrApi {
     }
 
     suspend fun resolveStreamUrl(token: String, fileId: String): String = withContext(Dispatchers.IO) {
+        val noRedirectClient = client.newBuilder().followRedirects(false).build()
         val request = Request.Builder()
             .url("https://www.seedr.cc/rest/file/$fileId")
             .addHeader("Authorization", "Bearer $token")
             .get()
             .build()
 
-        client.newCall(request).execute().use { response ->
+        noRedirectClient.newCall(request).execute().use { response ->
             val redirectLocation = response.header("Location")
             if (!redirectLocation.isNullOrEmpty()) {
                 return@withContext redirectLocation
             }
             val body = response.body?.string().orEmpty()
-            if (body.contains("\"url\"")) {
+            if (body.contains(""url"")) {
                 val json = JSONObject(body)
                 json.optString("url")
             } else {
