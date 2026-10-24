@@ -1,5 +1,6 @@
 package com.seedr.tvapp
 
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
@@ -28,7 +29,7 @@ class PlayerActivity : AppCompatActivity() {
 
         player = ExoPlayer.Builder(this).build().also { exoPlayer ->
             playerView.player = exoPlayer
-            val mediaItem = MediaItem.fromUri(streamUrl)
+            val mediaItem = MediaItem.fromUri(Uri.parse(streamUrl))
             exoPlayer.setMediaItem(mediaItem)
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true
